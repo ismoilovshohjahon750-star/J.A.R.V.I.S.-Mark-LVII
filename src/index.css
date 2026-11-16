@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+:root {
+  --hud-bg: #00060a;
+  --hud-panel: #010d14;
+  --hud-panel2: #010f18;
+  --hud-border: #0d3347;
+  --hud-border-a: #0f4060;
+  --hud-border-b: #1a5c7a;
+  --hud-pri: #00d4ff;
+  --hud-pri-dim: #007a99;
+  --hud-pri-gho: #001f2e;
+  --hud-text: #8ffcff;
+  --hud-text-dim: #3a8a9a;
+  --hud-text-med: #5ab8cc;
+  --hud-white: #d8f8ff;
+  --hud-bar-bg: #011520;
+  --hud-acc: #ff6b00;
+  --hud-acc2: #ffcc00;
+  --hud-green: #00ff88;
+  --hud-green-d: #00aa55;
+  --hud-red: #ff3355;
+  --hud-muted-c: #ff3366;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--hud-bg);
+  color: var(--hud-text);
+  font-family: 'Segoe UI', 'Inter', system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+
+.hud-selectable {
+  user-select: text;
+}
+
+.hud-chamfer {
+  clip-path: polygon(
+    10px 0,
+    100% 0,
+    100% calc(100% - 10px),
+    calc(100% - 10px) 100%,
+    0 100%,
+    0 10px
+  );
+}
+
+.hud-chamfer-sm {
+  clip-path: polygon(
+    6px 0,
+    100% 0,
+    100% calc(100% - 6px),
+    calc(100% - 6px) 100%,
+    0 100%,
+    0 6px
+  );
+}
+
+/* Custom HUD Scrollbar matching gui/style.py scroll_css() */
+.hud-scroll::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.hud-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.hud-scroll::-webkit-scrollbar-thumb {
+  background: var(--hud-border-b);
+}
+
+.hud-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--hud-pri-dim);
+}

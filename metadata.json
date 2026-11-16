@@ -1,0 +1,6 @@
+{
+  "name": "J.A.R.V.I.S. — Mark LVII",
+  "description": "Mark-XXX (Mark LVII) holographic personal AI system with 3D HUD avatar, voice interaction, persistent memory, autonomous background tasks, routines, and remote companion dashboard.",
+  "requestFramePermissions": ["microphone", "camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

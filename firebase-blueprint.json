@@ -1,0 +1,348 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile and Mark-XXX HUD/assistant configuration.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 256
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "assistantName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "userName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "accentColor": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "hudStyle": {
+          "type": "string",
+          "enum": ["face", "reactor"]
+        },
+        "voiceName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "morningBrief": {
+          "type": "boolean"
+        },
+        "pushToTalk": {
+          "type": "boolean"
+        },
+        "wakeWord": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "displayName",
+        "assistantName",
+        "userName",
+        "accentColor",
+        "hudStyle",
+        "voiceName",
+        "morningBrief",
+        "pushToTalk",
+        "wakeWord",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Communications log entry between user and assistant.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "assistant", "system"]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 12000
+        },
+        "source": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "role", "text", "source", "createdAt"]
+    },
+    "MemoryItem": {
+      "title": "MemoryItem",
+      "description": "Persistent long-term memory entry for Mark-XXX.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["identity", "preference", "project", "session", "fact"]
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "category", "key", "content", "createdAt", "updatedAt"]
+    },
+    "BackgroundTask": {
+      "title": "BackgroundTask",
+      "description": "Autonomous background research or analysis task.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "agent": {
+          "type": "string",
+          "enum": ["general", "researcher"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["queued", "running", "done", "failed", "cancelled"]
+        },
+        "result": {
+          "type": "string",
+          "maxLength": 16000
+        },
+        "steps": {
+          "type": "array"
+        },
+        "budgetMinutes": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "title",
+        "prompt",
+        "agent",
+        "status",
+        "result",
+        "steps",
+        "budgetMinutes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "RoutineItem": {
+      "title": "RoutineItem",
+      "description": "Automated Mark-XXX routine (briefing, check-in, scheduled prompt/task).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["say", "prompt", "task", "builtin"]
+        },
+        "triggerType": {
+          "type": "string",
+          "enum": ["time", "startup", "idle"]
+        },
+        "scheduleText": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "quiet": {
+          "type": "boolean"
+        },
+        "runs": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "name",
+        "kind",
+        "triggerType",
+        "scheduleText",
+        "text",
+        "enabled",
+        "quiet",
+        "runs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MonitorItem": {
+      "title": "MonitorItem",
+      "description": "Background topic watch monitor.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "frequency": {
+          "type": "string",
+          "enum": ["daily", "hourly", "weekly"]
+        },
+        "lastSummary": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "topic",
+        "frequency",
+        "lastSummary",
+        "enabled",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Owner-private Mark-XXX user profile and HUD settings."
+    },
+    "/users/{userId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Owner-private communications log messages."
+    },
+    "/users/{userId}/memories/{memoryId}": {
+      "schema": { "$ref": "#/entities/MemoryItem" },
+      "description": "Owner-private persistent long-term memories."
+    },
+    "/users/{userId}/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/BackgroundTask" },
+      "description": "Owner-private autonomous background tasks."
+    },
+    "/users/{userId}/routines/{routineId}": {
+      "schema": { "$ref": "#/entities/RoutineItem" },
+      "description": "Owner-private automated routines."
+    },
+    "/users/{userId}/monitors/{monitorId}": {
+      "schema": { "$ref": "#/entities/MonitorItem" },
+      "description": "Owner-private background topic monitors."
+    }
+  }
+}
