@@ -254,6 +254,54 @@ async function generateWithResilience(params: {
   throw lastErr;
 }
 
+async function generateGroqChatResponse(params: {
+  messages: Array<{ role: string; content: string }>;
+  systemInstruction?: string;
+}): Promise<string | null> {
+  const apiKey = (process.env.GROQ_API_KEY || '').trim();
+  if (!apiKey || apiKey === 'MY_GROQ_API_KEY') return null;
+
+  try {
+    const groqMessages: Array<{ role: string; content: string }> = [];
+    if (params.systemInstruction) {
+      groqMessages.push({ role: 'system', content: params.systemInstruction });
+    }
+    for (const m of params.messages) {
+      if (m.content) {
+        groqMessages.push({
+          role: m.role === 'assistant' ? 'assistant' : 'user',
+          content: m.content,
+        });
+      }
+    }
+
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: groqMessages,
+        temperature: 0.6,
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn(`[Groq fallback] HTTP ${res.status}:`, errText.slice(0, 160));
+      return null;
+    }
+
+    const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    return json.choices?.[0]?.message?.content || null;
+  } catch (err) {
+    console.warn('[Groq fallback] Error:', err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
 const app = express();
 app.use(express.json({ limit: '25mb' }));
 
@@ -991,8 +1039,26 @@ app.post('/api/chat', async (req, res) => {
         title: c.web!.title || c.web!.uri!,
       }));
 
+    let replyText = finalResponse.text || 'Command processed.';
+    if (process.env.GROQ_API_KEY && (!actions.length || actions.every((a) => a.name === 'server_status'))) {
+      const groqHistory = [
+        ...formattedHistory.map((h) => ({
+          role: h.role === 'model' ? 'assistant' : 'user',
+          content: String((h.parts as Array<{ text?: string }>)?.[0]?.text || ''),
+        })),
+        { role: 'user', content: fullUserText },
+      ];
+      const groqReply = await generateGroqChatResponse({
+        messages: groqHistory,
+        systemInstruction,
+      });
+      if (groqReply) {
+        replyText = groqReply;
+      }
+    }
+
     res.json({
-      text: finalResponse.text || 'Command processed.',
+      text: replyText,
       actions,
       sources,
     });
