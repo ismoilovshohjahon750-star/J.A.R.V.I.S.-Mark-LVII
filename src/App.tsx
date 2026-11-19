@@ -2,25 +2,40 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Camera,
   Clipboard,
+  Code2,
+  Download,
   LogOut,
   Maximize2,
   Mic,
   MicOff,
   Monitor,
   Play,
+  Plug,
+  Presentation,
+  RotateCcw,
   Search,
   Send,
   Settings,
   ShieldCheck,
   Sliders,
   Square,
+  Trash2,
   Upload,
   Volume2,
   VolumeX,
   X,
 } from 'lucide-react';
 import { ChamferPanel } from './components/ChamferPanel';
+import { CodeProjectState, CodeStudio } from './components/CodeStudio';
 import { AssistantState, HudCanvas } from './components/HudCanvas';
+import {
+  McpActivityItem,
+  McpStudio,
+  McpStudioState,
+  TrainingKind,
+  TrainingLessonItem,
+} from './components/McpStudio';
+import { PptxDeckState, PptxStudio } from './components/PptxStudio';
 import {
   CustomizeOverlay,
   EngineOverlay,
@@ -89,12 +104,16 @@ export default function App() {
     addMessage,
     addMemory,
     removeMemory,
+    upsertMemoryById,
+    deleteMemoryById,
     createTask,
     finishTask,
     createRoutine,
     toggleRoutine,
     createMonitor,
     removeMonitor,
+    clearChatMessages,
+    clearAllData,
   } = useJarvisData();
 
   const assistantName = profile?.assistantName || 'J.A.R.V.I.S';
@@ -177,12 +196,32 @@ export default function App() {
   const [leftTab, setLeftTab] = useState<'tasks' | 'routines'>('tasks');
   const [setupOpen, setSetupOpen] = useState(false);
   const [controlsOpen, setControlsOpen] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
   const [activeOverlay, setActiveOverlay] = useState<
     null | 'customize' | 'memory' | 'remote' | 'engine' | 'server'
   >(null);
   const [contentPanel, setContentPanel] = useState<ContentPanelState | null>(null);
   const [remoteStatus, setRemoteStatus] = useState<RemoteServerStatusData | null>(null);
   const [remoteFileViewer, setRemoteFileViewer] = useState<RemoteFilePreviewData | null>(null);
+  const [hudMode, setHudMode] = useState<'hologram' | 'code' | 'pptx' | 'mcp'>('hologram');
+  const [codeProject, setCodeProject] = useState<CodeProjectState | null>(null);
+  const [codeGenerating, setCodeGenerating] = useState(false);
+  const [codeRunning, setCodeRunning] = useState(false);
+  const [codeError, setCodeError] = useState<string | null>(null);
+  const [pptxDeck, setPptxDeck] = useState<PptxDeckState | null>(null);
+  const [pptxGenerating, setPptxGenerating] = useState(false);
+  const [pptxRendering, setPptxRendering] = useState(false);
+  const [pptxError, setPptxError] = useState<string | null>(null);
+  const [mcpState, setMcpState] = useState<McpStudioState | null>(null);
+  const [mcpInitialTab, setMcpInitialTab] = useState<'training' | 'connect' | 'console'>('training');
+  const [mcpBusy, setMcpBusy] = useState(false);
+  const [previewStamp, setPreviewStamp] = useState(() => Date.now());
+  const [desktopExeInfo, setDesktopExeInfo] = useState<{
+    available: boolean;
+    fileName: string;
+    sizeBytes: number;
+  } | null>(null);
 
   const openRemoteFileInHud = useCallback(
     async (
@@ -230,9 +269,175 @@ export default function App() {
     };
   }, []);
 
-  // Attachments, Camera, Search & Clipboard
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/desktop/info')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (alive && data?.available) {
+          setDesktopExeInfo(data);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const persistLessonToFirestore = useCallback(
+    async (lesson: TrainingLessonItem) => {
+      if (!user) return;
+      const cat =
+        lesson.kind === 'skill'
+          ? 'project'
+          : lesson.kind === 'rule' || lesson.kind === 'persona'
+          ? 'preference'
+          : 'fact';
+      const serialized = JSON.stringify({
+        id: lesson.id,
+        kind: lesson.kind,
+        title: lesson.title.slice(0, 120),
+        trigger: (lesson.trigger || '').slice(0, 300),
+        content: lesson.content.slice(0, 1200),
+        source: lesson.source,
+        enabled: lesson.enabled,
+        createdAt: lesson.createdAt,
+        updatedAt: lesson.updatedAt,
+      });
+      await upsertMemoryById(
+        `mcp_train_${lesson.id}`,
+        cat,
+        `mcp_train:${lesson.id}`,
+        serialized
+      );
+    },
+    [user, upsertMemoryById]
+  );
+
+  // Sync HUD snapshot & Firestore training lessons to MCP server
+  useEffect(() => {
+    if (!user) return;
+    const timer = setTimeout(() => {
+      void fetch('/api/mcp/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assistantName,
+          userName,
+          memories: memories.map((m) => ({ category: m.category, key: m.key, content: m.content })),
+          routines: routines.map((r) => ({ name: r.name, scheduleText: r.scheduleText, enabled: r.enabled })),
+          tasks: tasks.map((t) => ({ title: t.title, status: t.status })),
+          recentMessages: messages.slice(-20).map((m) => ({ role: m.role, text: m.text, source: m.source })),
+        }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (data && Array.isArray(data.lessons)) {
+            setMcpState(data as McpStudioState);
+          }
+        })
+        .catch(() => {});
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [user, assistantName, userName, memories, routines, tasks, messages]);
+
+  // Live SSE feed from MCP Server (Claude AI tool calls & lessons)
+  useEffect(() => {
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource('/api/mcp/events');
+      es.addEventListener('mcp_state', (e) => {
+        try {
+          const data = JSON.parse((e as MessageEvent).data) as McpStudioState;
+          setMcpState(data);
+        } catch {
+          // Ignore malformed event
+        }
+      });
+      es.addEventListener('lesson_upserted', (e) => {
+        try {
+          const lesson = JSON.parse((e as MessageEvent).data) as TrainingLessonItem;
+          setMcpState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  lessons: [lesson, ...prev.lessons.filter((l) => l.id !== lesson.id)],
+                }
+              : prev
+          );
+          if (lesson.source === 'claude-mcp' || lesson.source === 'jarvis') {
+            void persistLessonToFirestore(lesson);
+          }
+        } catch {
+          // Ignore malformed event
+        }
+      });
+      es.addEventListener('lesson_deleted', (e) => {
+        try {
+          const { id } = JSON.parse((e as MessageEvent).data) as { id: string };
+          setMcpState((prev) =>
+            prev ? { ...prev, lessons: prev.lessons.filter((l) => l.id !== id) } : prev
+          );
+          void deleteMemoryById(`mcp_train_${id}`);
+        } catch {
+          // Ignore malformed event
+        }
+      });
+      es.addEventListener('mcp_activity', (e) => {
+        try {
+          const evt = JSON.parse((e as MessageEvent).data) as McpActivityItem;
+          setMcpState((prev) =>
+            prev ? { ...prev, activityLog: [evt, ...prev.activityLog].slice(0, 60) } : prev
+          );
+        } catch {
+          // Ignore malformed event
+        }
+      });
+      es.addEventListener('hud_action', (e) => {
+        try {
+          const act = JSON.parse((e as MessageEvent).data) as { name: string; args?: Record<string, unknown> };
+          const args = act.args || {};
+          if (act.name === 'save_memory') {
+            void addMemory(
+              (args.category as 'fact') || 'fact',
+              String(args.key || 'note'),
+              String(args.content || '')
+            );
+          } else if (act.name === 'create_routine') {
+            void createRoutine({
+              name: String(args.name || 'Claude Routine'),
+              kind: (args.kind as 'prompt') || 'prompt',
+              triggerType: (args.triggerType as 'time') || 'time',
+              scheduleText: String(args.scheduleText || 'Daily'),
+              text: String(args.text || ''),
+            });
+          } else if (act.name === 'open_pptx_studio' && args.deck) {
+            setPptxDeck(args.deck as PptxDeckState);
+            setHudMode('pptx');
+          } else if (act.name === 'open_code_studio' && args.project) {
+            setCodeProject(args.project as CodeProjectState);
+            setHudMode('code');
+            setPreviewStamp(Date.now());
+          }
+        } catch {
+          // Ignore malformed event
+        }
+      });
+    } catch {
+      // EventSource unavailable
+    }
+    return () => {
+      es?.close();
+    };
+  }, [persistLessonToFirestore, deleteMemoryById, addMemory, createRoutine]);
+
+  // Attachments, Camera, Screen Vision, Search & Clipboard
   const [attachedFile, setAttachedFile] = useState<AttachedFile | null>(null);
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [screenOpen, setScreenOpen] = useState(false);
+  const [screenFallbackOpen, setScreenFallbackOpen] = useState(false);
+  const [screenBusy, setScreenBusy] = useState(false);
+  const [screenNotice, setScreenNotice] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMode, setSearchMode] = useState<'search' | 'news' | 'research' | 'price' | 'compare'>('search');
@@ -241,18 +446,23 @@ export default function App() {
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const camStreamRef = useRef<MediaStream | null>(null);
+  const screenVideoRef = useRef<HTMLVideoElement | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const screenFileInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRafRef = useRef<number>(0);
   const recognitionRef = useRef<unknown>(null);
+  const isSpeakingRef = useRef(false);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length]);
 
   const stopSpeaking = useCallback(() => {
+    isSpeakingRef.current = false;
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
@@ -272,6 +482,7 @@ export default function App() {
     async (text: string) => {
       if (!voiceEnabled || !text.trim()) return;
       stopSpeaking();
+      isSpeakingRef.current = true;
       setAssistantState('SPEAKING');
 
       try {
@@ -281,8 +492,8 @@ export default function App() {
           body: JSON.stringify({ text: text.slice(0, 2000), voiceName }),
         });
         if (!res.ok) throw new Error('TTS unavailable');
-        const data = (await res.json()) as { audioBase64?: string };
-        if (!data.audioBase64) throw new Error('Empty TTS');
+        const data = (await res.json()) as { audioBase64?: string | null; fallback?: string };
+        if (data.fallback === 'browser' || !data.audioBase64) throw new Error('Browser TTS fallback');
 
         const audio = new Audio(`data:audio/wav;base64,${data.audioBase64}`);
         audioRef.current = audio;
@@ -320,6 +531,7 @@ export default function App() {
         }
 
         audio.onended = () => {
+          isSpeakingRef.current = false;
           setAudioLevel(0);
           setAssistantState(micActive ? 'LISTENING' : 'STANDBY');
         };
@@ -327,14 +539,23 @@ export default function App() {
       } catch {
         // Fallback to browser SpeechSynthesis
         if ('speechSynthesis' in window) {
-          const utt = new SpeechSynthesisUtterance(text.slice(0, 600));
+          const utt = new SpeechSynthesisUtterance(text.replace(/[*_`#>~|]/g, ' ').slice(0, 600));
+          utt.rate = 1.05;
+          utt.pitch = 1.0;
           utt.onend = () => {
+            isSpeakingRef.current = false;
+            setAudioLevel(0);
+            setAssistantState(micActive ? 'LISTENING' : 'STANDBY');
+          };
+          utt.onerror = () => {
+            isSpeakingRef.current = false;
             setAudioLevel(0);
             setAssistantState(micActive ? 'LISTENING' : 'STANDBY');
           };
           setAudioLevel(0.45);
           window.speechSynthesis.speak(utt);
         } else {
+          isSpeakingRef.current = false;
           setAssistantState('STANDBY');
         }
       }
@@ -379,12 +600,38 @@ export default function App() {
       const currentAttachment = attachedFile;
       setAttachedFile(null);
 
+      const looksLikePptxBuild =
+        !visionImage &&
+        /(pptx|powerpoint|prezentatsiya|taqdimot|slayd(?:lar)?)/i.test(userPrompt) &&
+        /(yoz|yarat|qil|tayyorla|tuz|yasab|qosh|ber|create|build|make|generate|design)/i.test(userPrompt);
+
+      const looksLikeCodeBuild =
+        !visionImage &&
+        !looksLikePptxBuild &&
+        !/\b(kompyuter|kampiyuter|desktop|downloads|documents|faylni\s*och|topib\s*ber|server\s*holat)\b/i.test(userPrompt) &&
+        /(kod(?:ini)?\s*(?:yoz|yarat|tuz|qil)|yozib\s*ber.*kod|full[\s-]*stack|node\.?js.*(?:app|sayt|ilova|dastur|server|yoz|qil)|(?:veb[\s-]*sayt|web\s*app|sayt|dastur|ilova|dashboard|portal|api).*(?:yarat|tuz|yoz|qil|qur)|(?:build|create|write|make)\s+(?:a\s+|an\s+|the\s+)?(?:full[\s-]*stack|node\.?js|express|web\s*app|website|app|backend|code))/i.test(
+          userPrompt
+        );
+
+      if (looksLikePptxBuild) {
+        setHudMode('pptx');
+        setPptxGenerating(true);
+        setPptxError(null);
+      } else if (looksLikeCodeBuild) {
+        setHudMode('code');
+        setCodeGenerating(true);
+        setCodeError(null);
+      }
+
       await addMessage('user', userPrompt, visionImage ? visionImage.label : 'hud');
 
       try {
         const payload = {
           message: userPrompt,
-          history: messages.slice(-14).map((m) => ({ role: m.role, text: m.text })),
+          history: messages
+            .filter((m) => m.role === 'user' || m.role === 'assistant')
+            .slice(-10)
+            .map((m) => ({ role: m.role, text: m.text })),
           assistantName,
           userName,
           memories: memories.map((m) => ({ category: m.category, key: m.key, content: m.content })),
@@ -473,6 +720,22 @@ export default function App() {
                 );
               }
             })();
+          } else if (act.name === 'open_code_studio' && args.project) {
+            setCodeProject(args.project as CodeProjectState);
+            setHudMode('code');
+            setCodeError(null);
+            setPreviewStamp(Date.now());
+          } else if (act.name === 'open_pptx_studio' && args.deck) {
+            setPptxDeck(args.deck as PptxDeckState);
+            setHudMode('pptx');
+            setPptxError(null);
+          } else if (act.name === 'open_mcp_studio') {
+            const reqTab = args.tab === 'training' || args.tab === 'console' ? args.tab : 'connect';
+            setMcpInitialTab(reqTab);
+            setHudMode('mcp');
+          } else if (act.name === 'sync_mcp_lesson' && args.lesson) {
+            const lesson = args.lesson as TrainingLessonItem;
+            await persistLessonToFirestore(lesson);
           }
         }
 
@@ -487,9 +750,13 @@ export default function App() {
         await speakResponse(reply);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Request failed.';
+        if (looksLikePptxBuild) setPptxError(msg);
+        if (looksLikeCodeBuild) setCodeError(msg);
         await addMessage('system', `Error: ${msg}`, 'sys');
         setAssistantState(micActive ? 'LISTENING' : 'STANDBY');
       } finally {
+        setCodeGenerating(false);
+        setPptxGenerating(false);
         setBusy(false);
       }
     },
@@ -511,6 +778,8 @@ export default function App() {
       createMonitor,
       speakResponse,
       micActive,
+      openRemoteFileInHud,
+      persistLessonToFirestore,
     ]
   );
 
@@ -550,6 +819,7 @@ export default function App() {
     rec.interimResults = false;
     rec.lang = navigator.language || 'en-US';
     rec.onresult = (ev) => {
+      if (isSpeakingRef.current) return;
       const last = ev.results[ev.results.length - 1];
       if (last && last[0]?.transcript) {
         const spoken = last[0].transcript.trim();
@@ -616,43 +886,465 @@ export default function App() {
     }
   };
 
-  const captureCameraFrame = () => {
+  const waitForVideoFrameAndCapture = async (vid: HTMLVideoElement): Promise<string | null> => {
+    if (vid.paused) {
+      await vid.play().catch(() => {});
+    }
+    const deadline = Date.now() + 2500;
+    while ((vid.readyState < 2 || vid.videoWidth === 0 || vid.videoHeight === 0) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (vid.videoWidth === 0 || vid.videoHeight === 0) return null;
+    await new Promise((r) => requestAnimationFrame(() => r(undefined)));
+
+    const maxW = 1600;
+    const scale = vid.videoWidth > maxW ? maxW / vid.videoWidth : 1;
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(vid.videoWidth * scale));
+    c.height = Math.max(1, Math.round(vid.videoHeight * scale));
+    const ctx = c.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(vid, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.84).split(',')[1] || null;
+  };
+
+  const captureCameraFrame = async () => {
     const vid = videoRef.current;
     if (!vid) return;
-    const c = document.createElement('canvas');
-    c.width = vid.videoWidth || 640;
-    c.height = vid.videoHeight || 480;
-    const ctx = c.getContext('2d');
-    if (!ctx) return;
-    ctx.drawImage(vid, 0, 0, c.width, c.height);
-    const dataUrl = c.toDataURL('image/jpeg', 0.82);
-    const base64 = dataUrl.split(',')[1];
-    void sendCommand('Describe what you see on my webcam.', {
+    const base64 = await waitForVideoFrameAndCapture(vid);
+    if (!base64) {
+      await addMessage('system', 'Webcam frame not ready yet. Please try again.', 'sys');
+      return;
+    }
+    void sendCommand(input.trim() || 'Describe what you see on my webcam.', {
       base64,
       mimeType: 'image/jpeg',
       label: 'webcam',
     });
   };
 
-  const captureScreen = async () => {
+  const stopScreenVision = useCallback(() => {
+    screenStreamRef.current?.getTracks().forEach((tr) => tr.stop());
+    screenStreamRef.current = null;
+    setScreenOpen(false);
+  }, []);
+
+  const handleClearChat = useCallback(async () => {
+    if (resetBusy) return;
+    setResetBusy(true);
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-      const vid = document.createElement('video');
-      vid.srcObject = stream;
-      await vid.play();
-      const c = document.createElement('canvas');
-      c.width = vid.videoWidth || 1280;
-      c.height = vid.videoHeight || 720;
-      c.getContext('2d')?.drawImage(vid, 0, 0, c.width, c.height);
-      stream.getTracks().forEach((tr) => tr.stop());
-      const base64 = c.toDataURL('image/jpeg', 0.82).split(',')[1];
-      void sendCommand('Analyze what is currently visible on my screen capture.', {
-        base64,
-        mimeType: 'image/jpeg',
-        label: 'screen capture',
+      stopSpeaking();
+      await clearChatMessages();
+      setContentPanel(null);
+    } finally {
+      setResetBusy(false);
+    }
+  }, [resetBusy, stopSpeaking, clearChatMessages]);
+
+  const handleFullResetAndClear = useCallback(async () => {
+    if (resetBusy) return;
+    setResetBusy(true);
+    try {
+      stopSpeaking();
+      stopScreenVision();
+      camStreamRef.current?.getTracks().forEach((tr) => tr.stop());
+      camStreamRef.current = null;
+      setCameraOpen(false);
+      setScreenFallbackOpen(false);
+      setScreenNotice(null);
+      setSetupOpen(false);
+      setControlsOpen(false);
+      setConfirmClearAll(false);
+      setActiveOverlay(null);
+      setContentPanel(null);
+      setAttachedFile(null);
+      setRemoteFileViewer(null);
+      setSearchOpen(false);
+      setSearchQuery('');
+      setClipboardOpen(false);
+      setClipboardText('');
+      setInput('');
+      setRemoteStatus(null);
+      setHudMode('hologram');
+      setCodeProject(null);
+      setCodeError(null);
+      setPptxDeck(null);
+      setPptxError(null);
+
+      await clearAllData();
+      await fetch('/api/system/reset', { method: 'POST' }).catch(() => {});
+      setAssistantState(micActive ? 'LISTENING' : 'STANDBY');
+    } finally {
+      setResetBusy(false);
+    }
+  }, [resetBusy, stopSpeaking, stopScreenVision, clearAllData, micActive]);
+
+  const generateCodeFromStudio = useCallback(
+    async (prompt: string) => {
+      if (!prompt.trim() || codeGenerating) return;
+      setHudMode('code');
+      setCodeGenerating(true);
+      setCodeError(null);
+      setAssistantState('THINKING');
+      try {
+        const res = await fetch('/api/code/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: prompt.trim(),
+            existingFiles: codeProject?.files,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Code generation failed.');
+        setCodeProject(data.project as CodeProjectState);
+        setPreviewStamp(Date.now());
+      } catch (err) {
+        setCodeError(err instanceof Error ? err.message : 'Failed to generate code.');
+      } finally {
+        setCodeGenerating(false);
+        setAssistantState(micActive ? 'LISTENING' : 'STANDBY');
+      }
+    },
+    [codeGenerating, codeProject?.files, micActive]
+  );
+
+  const runEditedCodeProject = useCallback(async (project: CodeProjectState) => {
+    setCodeRunning(true);
+    setCodeError(null);
+    try {
+      const res = await fetch('/api/code/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: project.title,
+          projectName: project.projectName,
+          entryFile: project.entryFile,
+          files: project.files,
+        }),
       });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to run Node.js project.');
+      setCodeProject(data.project as CodeProjectState);
+      setPreviewStamp(Date.now());
+    } catch (err) {
+      setCodeError(err instanceof Error ? err.message : 'Run failed.');
+    } finally {
+      setCodeRunning(false);
+    }
+  }, []);
+
+  const updateCodeFileContent = useCallback((filePath: string, nextContent: string) => {
+    setCodeProject((prev) =>
+      prev
+        ? {
+            ...prev,
+            files: prev.files.map((f) => (f.path === filePath ? { ...f, content: nextContent } : f)),
+          }
+        : prev
+    );
+  }, []);
+
+  const generatePptxFromStudio = useCallback(
+    async (prompt: string) => {
+      if (!prompt.trim() || pptxGenerating) return;
+      setHudMode('pptx');
+      setPptxGenerating(true);
+      setPptxError(null);
+      setAssistantState('THINKING');
+      try {
+        const res = await fetch('/api/pptx/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: prompt.trim() }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'PPTX generation failed.');
+        setPptxDeck(data.deck as PptxDeckState);
+      } catch (err) {
+        setPptxError(err instanceof Error ? err.message : 'Failed to generate presentation.');
+      } finally {
+        setPptxGenerating(false);
+        setAssistantState(micActive ? 'LISTENING' : 'STANDBY');
+      }
+    },
+    [pptxGenerating, micActive]
+  );
+
+  const updatePptxDeck = useCallback(async (nextDeck: PptxDeckState) => {
+    setPptxDeck(nextDeck);
+    setPptxRendering(true);
+    setPptxError(null);
+    try {
+      const res = await fetch('/api/pptx/render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deck: nextDeck }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to rebuild PPTX.');
+      if (data.deck) setPptxDeck(data.deck as PptxDeckState);
+    } catch (err) {
+      setPptxError(err instanceof Error ? err.message : 'PPTX rebuild failed.');
+    } finally {
+      setPptxRendering(false);
+    }
+  }, []);
+
+  const handleMcpAddLesson = useCallback(
+    async (input: { kind: TrainingKind; title: string; trigger?: string; content: string }) => {
+      setMcpBusy(true);
+      try {
+        const res = await fetch('/api/mcp/lessons', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(input),
+        });
+        const data = await res.json();
+        if (res.ok && data.lesson) {
+          await persistLessonToFirestore(data.lesson as TrainingLessonItem);
+        }
+      } finally {
+        setMcpBusy(false);
+      }
+    },
+    [persistLessonToFirestore]
+  );
+
+  const handleMcpToggleLesson = useCallback(
+    async (id: string) => {
+      const res = await fetch(`/api/mcp/lessons/${encodeURIComponent(id)}/toggle`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.lesson) {
+        await persistLessonToFirestore(data.lesson as TrainingLessonItem);
+      }
+    },
+    [persistLessonToFirestore]
+  );
+
+  const handleMcpDeleteLesson = useCallback(
+    async (id: string) => {
+      const res = await fetch(`/api/mcp/lessons/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (res.ok) {
+        await deleteMemoryById(`mcp_train_${id}`);
+      }
+    },
+    [deleteMemoryById]
+  );
+
+  const handleMcpRotateToken = useCallback(async () => {
+    const res = await fetch('/api/mcp/token/rotate', { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data.token) {
+      setMcpState((prev) => (prev ? { ...prev, token: data.token } : prev));
+    }
+  }, []);
+
+  const handleMcpToggleAuth = useCallback(async (next: boolean) => {
+    const res = await fetch('/api/mcp/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requireAuth: next }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      setMcpState((prev) => (prev ? { ...prev, requireAuth: Boolean(data.requireAuth) } : prev));
+    }
+  }, []);
+
+  const handleMcpRpcTest = useCallback(async (method: string, params?: Record<string, unknown>) => {
+    const res = await fetch('/api/mcp/console', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ method, params }),
+    });
+    const data = await res.json();
+    return data.response ?? data;
+  }, []);
+
+  const analyzeScreenFrame = useCallback(
+    async (base64: string, mimeType: string, label = 'screen capture') => {
+      if (busy) {
+        await addMessage('system', 'J.A.R.V.I.S. hozir band, bir soniyadan soʻng qayta urinib koʻring.', 'sys');
+        return;
+      }
+      const prompt = input.trim() || 'Analyze what is currently visible on my screen capture.';
+      if (input.trim()) setInput('');
+      await sendCommand(prompt, { base64, mimeType, label });
+    },
+    [busy, input, addMessage, sendCommand]
+  );
+
+  useEffect(() => {
+    if (screenOpen && screenVideoRef.current && screenStreamRef.current) {
+      screenVideoRef.current.srcObject = screenStreamRef.current;
+      screenVideoRef.current.play().catch(() => {});
+    }
+  }, [screenOpen]);
+
+  useEffect(() => {
+    return () => {
+      camStreamRef.current?.getTracks().forEach((tr) => tr.stop());
+      screenStreamRef.current?.getTracks().forEach((tr) => tr.stop());
+    };
+  }, []);
+
+  const captureScreenFrameFromLive = async () => {
+    const vid = screenVideoRef.current;
+    if (!vid) return;
+    setScreenBusy(true);
+    try {
+      const base64 = await waitForVideoFrameAndCapture(vid);
+      if (!base64) {
+        await addMessage('system', 'Screen frame not ready yet. Please try again.', 'sys');
+        return;
+      }
+      await analyzeScreenFrame(base64, 'image/jpeg', 'screen capture');
+    } finally {
+      setScreenBusy(false);
+    }
+  };
+
+  const handleScreenImageBlob = useCallback(
+    (blob: Blob, label = 'screen capture') => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = String(reader.result || '');
+        const base64 = dataUrl.split(',')[1];
+        if (!base64) return;
+        setScreenFallbackOpen(false);
+        setScreenNotice(null);
+        void analyzeScreenFrame(base64, blob.type || 'image/png', label);
+      };
+      reader.readAsDataURL(blob);
+    },
+    [analyzeScreenFrame]
+  );
+
+  useEffect(() => {
+    if (!screenFallbackOpen) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of Array.from(items)) {
+        if (item.type.startsWith('image/')) {
+          const blob = item.getAsFile();
+          if (blob) {
+            e.preventDefault();
+            handleScreenImageBlob(blob, 'screen capture');
+            return;
+          }
+        }
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [screenFallbackOpen, handleScreenImageBlob]);
+
+  const handlePasteScreenFromClipboard = async () => {
+    setScreenNotice(null);
+    try {
+      if (navigator.clipboard && 'read' in navigator.clipboard) {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const imgType = item.types.find((t) => t.startsWith('image/'));
+          if (imgType) {
+            const blob = await item.getType(imgType);
+            handleScreenImageBlob(blob, 'screen capture');
+            return;
+          }
+        }
+        setScreenNotice('Buferda rasm topilmadi. Avval skrinshot oling (Win+Shift+S / PrtScn) yoki fayldan yuklang.');
+      } else {
+        setScreenNotice('Ctrl+V tugmalarini bosing yoki skrinshot faylini tanlang.');
+      }
     } catch {
-      await addMessage('system', 'Screen capture cancelled or unavailable.', 'sys');
+      setScreenNotice('Klaviatura bilan Ctrl+V bosing yoki "Upload Screenshot" tugmasidan foydalaning.');
+    }
+  };
+
+  const handleRemoteScreenCapture = async () => {
+    setScreenBusy(true);
+    setScreenNotice(null);
+    try {
+      const res = await fetch('/api/server/screenshot', { method: 'POST' });
+      const data = (await res.json()) as { base64?: string; mimeType?: string; error?: string };
+      if (!res.ok || !data.base64) {
+        throw new Error(data.error || 'Remote screenshot unavailable.');
+      }
+      setScreenFallbackOpen(false);
+      await analyzeScreenFrame(data.base64, data.mimeType || 'image/jpeg', 'remote screen');
+    } catch (err) {
+      setScreenNotice(err instanceof Error ? err.message : 'Masofaviy kompyuter ekranini olib boʻlmadi.');
+    } finally {
+      setScreenBusy(false);
+    }
+  };
+
+  const captureScreen = async () => {
+    if (screenOpen) {
+      stopScreenVision();
+      return;
+    }
+    if (screenFallbackOpen) {
+      setScreenFallbackOpen(false);
+      return;
+    }
+
+    setScreenNotice(null);
+    const canDisplayMedia =
+      typeof navigator !== 'undefined' &&
+      Boolean(navigator.mediaDevices) &&
+      typeof navigator.mediaDevices.getDisplayMedia === 'function';
+
+    if (!canDisplayMedia) {
+      setScreenFallbackOpen(true);
+      setScreenNotice('Ushbu brauzerda toʻgʻridan-toʻgʻri ekran ulashish cheklangan. Skrinshot joylang yoki yuklang.');
+      return;
+    }
+
+    setScreenBusy(true);
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 15 } },
+        audio: false,
+      });
+      const track = stream.getVideoTracks()[0];
+      if (track) {
+        track.onended = () => {
+          stopScreenVision();
+        };
+      }
+      screenStreamRef.current = stream;
+      setScreenFallbackOpen(false);
+      setScreenOpen(true);
+
+      // Capture initial frame cleanly once decoded
+      const tempVid = document.createElement('video');
+      tempVid.muted = true;
+      tempVid.playsInline = true;
+      tempVid.srcObject = stream;
+      const base64 = await waitForVideoFrameAndCapture(tempVid);
+      tempVid.srcObject = null;
+
+      if (base64) {
+        await analyzeScreenFrame(base64, 'image/jpeg', 'screen capture');
+      }
+    } catch (err) {
+      const errName = err instanceof DOMException ? err.name : '';
+      const errMsg = err instanceof Error ? err.message : '';
+      if (errName === 'AbortError' || errMsg.toLowerCase().includes('cancelled by the user')) {
+        await addMessage('system', 'Screen capture cancelled.', 'sys');
+      } else {
+        setScreenFallbackOpen(true);
+        setScreenNotice(
+          window.self !== window.top
+            ? 'Iframe rejimi jonli ekran ulashishni cheklaydi. Skrinshot joylang (Ctrl+V), fayl yuklang yoki yangi oynada oching.'
+            : 'Ekran ulashishga ruxsat berilmadi. Skrinshot joylang (Ctrl+V) yoki fayl yuklang.'
+        );
+      }
+    } finally {
+      setScreenBusy(false);
     }
   };
 
@@ -1023,6 +1715,28 @@ export default function App() {
                 {item.label}
               </button>
             ))}
+            {desktopExeInfo?.available && (
+              <a
+                href="/api/desktop/download"
+                download={desktopExeInfo.fileName}
+                onClick={() => setSetupOpen(false)}
+                className="w-full px-2.5 py-1.5 text-[11px] font-semibold tracking-[1.2px] border border-l-[3px] cursor-pointer flex items-center justify-between gap-1.5"
+                style={{
+                  backgroundColor: 'var(--hud-panel2)',
+                  borderColor: 'var(--hud-border)',
+                  borderLeftColor: 'var(--hud-green)',
+                  color: 'var(--hud-green)',
+                }}
+              >
+                <span className="flex items-center gap-1.5 truncate">
+                  <Download className="w-3 h-3 shrink-0" />
+                  WINDOWS .EXE
+                </span>
+                <span className="text-[9px] font-mono shrink-0" style={{ color: 'var(--hud-text-dim)' }}>
+                  {(desktopExeInfo.sizeBytes / (1024 * 1024)).toFixed(0)} MB
+                </span>
+              </a>
+            )}
           </div>
         )}
 
@@ -1108,6 +1822,66 @@ export default function App() {
                   }}
                 />
               ))}
+            </div>
+            <div className="pt-1.5 border-t space-y-1.5" style={{ borderColor: 'var(--hud-border)' }}>
+              <button
+                onClick={() => {
+                  setControlsOpen(false);
+                  void handleClearChat();
+                }}
+                disabled={resetBusy}
+                className="w-full text-left px-2.5 py-1.5 text-[11px] font-semibold tracking-[1.2px] border border-l-[3px] cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                style={{
+                  backgroundColor: 'var(--hud-panel2)',
+                  borderColor: 'var(--hud-border)',
+                  borderLeftColor: 'var(--hud-acc)',
+                  color: 'var(--hud-text-med)',
+                }}
+              >
+                <Trash2 className="w-3 h-3" /> CLEAR CHAT LOG
+              </button>
+              {!confirmClearAll ? (
+                <button
+                  onClick={() => setConfirmClearAll(true)}
+                  disabled={resetBusy}
+                  className="w-full text-left px-2.5 py-1.5 text-[11px] font-semibold tracking-[1.2px] border border-l-[3px] cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                  style={{
+                    backgroundColor: 'var(--hud-panel2)',
+                    borderColor: 'var(--hud-border)',
+                    borderLeftColor: 'var(--hud-red)',
+                    color: 'var(--hud-red)',
+                  }}
+                >
+                  <RotateCcw className="w-3 h-3" /> CLEAR ALL DATA &amp; RESET
+                </button>
+              ) : (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => void handleFullResetAndClear()}
+                    disabled={resetBusy}
+                    className="flex-1 px-2 py-1.5 text-[10px] font-semibold tracking-[1.1px] border cursor-pointer disabled:opacity-50"
+                    style={{
+                      backgroundColor: 'rgba(255, 68, 85, 0.16)',
+                      borderColor: 'var(--hud-red)',
+                      color: 'var(--hud-red)',
+                    }}
+                  >
+                    {resetBusy ? 'CLEARING...' : 'CONFIRM WIPE'}
+                  </button>
+                  <button
+                    onClick={() => setConfirmClearAll(false)}
+                    disabled={resetBusy}
+                    className="px-2 py-1.5 text-[10px] font-semibold tracking-[1.1px] border cursor-pointer"
+                    style={{
+                      backgroundColor: 'var(--hud-panel2)',
+                      borderColor: 'var(--hud-border)',
+                      color: 'var(--hud-text-dim)',
+                    }}
+                  >
+                    CANCEL
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1275,55 +2049,278 @@ export default function App() {
           </ChamferPanel>
         </section>
 
-        {/* CENTER COLUMN — 3D HUD + DYNAMIC CONTENT PANEL */}
+        {/* CENTER COLUMN — 3D HUD, CODE STUDIO, OR PPTX STUDIO + DYNAMIC CONTENT PANEL */}
         <section className="flex flex-col gap-2.5 min-h-0 relative">
           <div
             className="flex-1 min-h-0 border relative overflow-hidden"
             style={{ borderColor: 'var(--hud-border)' }}
           >
-            <HudCanvas
-              hudStyle={hudStyle}
-              state={assistantState}
-              assistantName={assistantName}
-              audioLevel={audioLevel}
-              palette={palette}
-            />
+            {hudMode === 'code' ? (
+              <CodeStudio
+                project={codeProject}
+                generating={codeGenerating}
+                running={codeRunning}
+                error={codeError}
+                previewStamp={previewStamp}
+                onGenerate={(p) => void generateCodeFromStudio(p)}
+                onRunEdited={(proj) => void runEditedCodeProject(proj)}
+                onUpdateFileContent={updateCodeFileContent}
+                onReloadPreview={() => setPreviewStamp(Date.now())}
+                onCloseToHud={() => setHudMode('hologram')}
+              />
+            ) : hudMode === 'pptx' ? (
+              <PptxStudio
+                deck={pptxDeck}
+                generating={pptxGenerating}
+                rendering={pptxRendering}
+                error={pptxError}
+                onGenerate={(p) => void generatePptxFromStudio(p)}
+                onUpdateDeck={(next) => void updatePptxDeck(next)}
+                onCloseToHud={() => setHudMode('hologram')}
+              />
+            ) : hudMode === 'mcp' ? (
+              <McpStudio
+                mcpState={mcpState}
+                initialTab={mcpInitialTab}
+                busy={mcpBusy}
+                onAddLesson={handleMcpAddLesson}
+                onToggleLesson={handleMcpToggleLesson}
+                onDeleteLesson={handleMcpDeleteLesson}
+                onRotateToken={handleMcpRotateToken}
+                onToggleRequireAuth={handleMcpToggleAuth}
+                onRunRpcTest={handleMcpRpcTest}
+                onCloseToHud={() => setHudMode('hologram')}
+              />
+            ) : (
+              <>
+                <HudCanvas
+                  hudStyle={hudStyle}
+                  state={assistantState}
+                  assistantName={assistantName}
+                  audioLevel={audioLevel}
+                  palette={palette}
+                />
 
-            {/* Floating Webcam Preview (Mark-XXX bottom-right of HUD) */}
-            {cameraOpen && (
-              <div
-                className="absolute bottom-3 right-3 w-48 border p-1.5 z-20"
-                style={{
-                  backgroundColor: 'var(--hud-panel)',
-                  borderColor: 'var(--hud-pri)',
-                }}
-              >
-                <video ref={videoRef} className="w-full h-28 object-cover bg-black" muted playsInline />
-                <div className="flex gap-1 mt-1">
-                  <button
-                    onClick={captureCameraFrame}
-                    className="flex-1 py-1 text-[9px] font-semibold uppercase border cursor-pointer"
+            {/* Floating Webcam & Screen Vision Previews (Mark-XXX bottom-right of HUD) */}
+            {(cameraOpen || screenOpen || screenFallbackOpen) && (
+              <div className="absolute bottom-3 right-3 flex flex-col gap-2 z-20">
+                {screenOpen && (
+                  <div
+                    className="w-56 border p-1.5"
                     style={{
-                      backgroundColor: 'var(--hud-pri-gho)',
+                      backgroundColor: 'var(--hud-panel)',
                       borderColor: 'var(--hud-pri)',
-                      color: 'var(--hud-white)',
                     }}
                   >
-                    Analyze Frame
-                  </button>
-                  <button
-                    onClick={toggleCamera}
-                    className="px-2 py-1 text-[9px] border cursor-pointer"
-                    style={{ borderColor: 'var(--hud-border)', color: 'var(--hud-red)' }}
+                    <div className="flex items-center justify-between mb-1 px-0.5">
+                      <span className="text-[9px] font-mono uppercase tracking-wider" style={{ color: 'var(--hud-pri)' }}>
+                        SCREEN VISION LIVE
+                      </span>
+                      <button
+                        onClick={stopScreenVision}
+                        className="text-[9px] cursor-pointer"
+                        style={{ color: 'var(--hud-text-dim)' }}
+                        title="Close Screen Vision"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                    <video ref={screenVideoRef} className="w-full h-28 object-cover bg-black" muted playsInline />
+                    <div className="flex gap-1 mt-1">
+                      <button
+                        onClick={captureScreenFrameFromLive}
+                        disabled={screenBusy || busy}
+                        className="flex-1 py-1 text-[9px] font-semibold uppercase border cursor-pointer disabled:opacity-50"
+                        style={{
+                          backgroundColor: 'var(--hud-pri-gho)',
+                          borderColor: 'var(--hud-pri)',
+                          color: 'var(--hud-white)',
+                        }}
+                      >
+                        {screenBusy ? 'Analyzing...' : 'Analyze Screen'}
+                      </button>
+                      <button
+                        onClick={stopScreenVision}
+                        className="px-2 py-1 text-[9px] border cursor-pointer"
+                        style={{ borderColor: 'var(--hud-border)', color: 'var(--hud-red)' }}
+                      >
+                        Off
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {screenFallbackOpen && !screenOpen && (
+                  <div
+                    className="w-64 border p-2.5 space-y-2"
+                    style={{
+                      backgroundColor: 'var(--hud-panel)',
+                      borderColor: 'var(--hud-pri)',
+                    }}
                   >
-                    Off
-                  </button>
-                </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-mono font-semibold uppercase tracking-wider flex items-center gap-1" style={{ color: 'var(--hud-pri)' }}>
+                        <Monitor className="w-3 h-3" /> SCREEN VISION
+                      </span>
+                      <button
+                        onClick={() => setScreenFallbackOpen(false)}
+                        className="cursor-pointer"
+                        style={{ color: 'var(--hud-text-dim)' }}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    {screenNotice && (
+                      <p className="text-[10px] leading-snug" style={{ color: 'var(--hud-text-med)' }}>
+                        {screenNotice}
+                      </p>
+                    )}
+
+                    <input
+                      ref={screenFileInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) handleScreenImageBlob(f, 'screen capture');
+                        e.target.value = '';
+                      }}
+                    />
+
+                    <div className="grid grid-cols-1 gap-1.5">
+                      <button
+                        onClick={handlePasteScreenFromClipboard}
+                        disabled={screenBusy || busy}
+                        className="py-1.5 px-2 text-[10px] font-semibold uppercase border flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                        style={{
+                          backgroundColor: 'var(--hud-pri-gho)',
+                          borderColor: 'var(--hud-pri)',
+                          color: 'var(--hud-white)',
+                        }}
+                      >
+                        <Clipboard className="w-3 h-3" /> Paste Screenshot (Ctrl+V)
+                      </button>
+
+                      <button
+                        onClick={() => screenFileInputRef.current?.click()}
+                        disabled={screenBusy || busy}
+                        className="py-1.5 px-2 text-[10px] font-semibold uppercase border flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                        style={{
+                          backgroundColor: 'var(--hud-panel2)',
+                          borderColor: 'var(--hud-border)',
+                          color: 'var(--hud-text)',
+                        }}
+                      >
+                        <Upload className="w-3 h-3" /> Upload Screenshot
+                      </button>
+
+                      {remoteStatus?.online && (
+                        <button
+                          onClick={handleRemoteScreenCapture}
+                          disabled={screenBusy || busy}
+                          className="py-1.5 px-2 text-[10px] font-semibold uppercase border flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                          style={{
+                            backgroundColor: 'var(--hud-panel2)',
+                            borderColor: 'var(--hud-green)',
+                            color: 'var(--hud-green)',
+                          }}
+                        >
+                          <Monitor className="w-3 h-3" /> {screenBusy ? 'Capturing PC...' : 'Capture Remote PC'}
+                        </button>
+                      )}
+
+                      {typeof window !== 'undefined' && window.self !== window.top && (
+                        <a
+                          href={window.location.href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="py-1 px-2 text-[9px] font-mono uppercase border flex items-center justify-center gap-1 text-center"
+                          style={{
+                            borderColor: 'var(--hud-border)',
+                            color: 'var(--hud-pri)',
+                          }}
+                        >
+                          <Maximize2 className="w-3 h-3" /> Open Full Tab for Live Share
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {cameraOpen && (
+                  <div
+                    className="w-48 border p-1.5"
+                    style={{
+                      backgroundColor: 'var(--hud-panel)',
+                      borderColor: 'var(--hud-pri)',
+                    }}
+                  >
+                    <video ref={videoRef} className="w-full h-28 object-cover bg-black" muted playsInline />
+                    <div className="flex gap-1 mt-1">
+                      <button
+                        onClick={captureCameraFrame}
+                        className="flex-1 py-1 text-[9px] font-semibold uppercase border cursor-pointer"
+                        style={{
+                          backgroundColor: 'var(--hud-pri-gho)',
+                          borderColor: 'var(--hud-pri)',
+                          color: 'var(--hud-white)',
+                        }}
+                      >
+                        Analyze Frame
+                      </button>
+                      <button
+                        onClick={toggleCamera}
+                        className="px-2 py-1 text-[9px] border cursor-pointer"
+                        style={{ borderColor: 'var(--hud-border)', color: 'var(--hud-red)' }}
+                      >
+                        Off
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
             {/* Quick Tool Ribbon top-right of HUD */}
-            <div className="absolute top-3 right-3 flex items-center gap-1.5 z-20">
+            <div className="absolute top-3 right-3 flex flex-wrap items-center justify-end gap-1.5 z-20 max-w-[calc(100%-24px)]">
+              <button
+                onClick={() => setHudMode('code')}
+                className="px-2 py-1 text-[10px] font-mono border flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+                style={{
+                  backgroundColor: codeProject ? 'var(--hud-pri-gho)' : 'var(--hud-panel)',
+                  borderColor: codeProject ? 'var(--hud-pri)' : 'var(--hud-border)',
+                  color: codeProject ? 'var(--hud-white)' : 'var(--hud-text)',
+                }}
+              >
+                <Code2 className="w-3 h-3" /> CODE STUDIO
+              </button>
+              <button
+                onClick={() => setHudMode('pptx')}
+                className="px-2 py-1 text-[10px] font-mono border flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+                style={{
+                  backgroundColor: pptxDeck ? 'var(--hud-pri-gho)' : 'var(--hud-panel)',
+                  borderColor: pptxDeck ? 'var(--hud-pri)' : 'var(--hud-border)',
+                  color: pptxDeck ? 'var(--hud-white)' : 'var(--hud-text)',
+                }}
+              >
+                <Presentation className="w-3 h-3" /> PPTX STUDIO
+              </button>
+              <button
+                onClick={() => {
+                  setMcpInitialTab('training');
+                  setHudMode('mcp');
+                }}
+                className="px-2 py-1 text-[10px] font-mono border flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+                style={{
+                  backgroundColor: mcpState?.lessons?.length ? 'var(--hud-pri-gho)' : 'var(--hud-panel)',
+                  borderColor: mcpState?.lessons?.length ? 'var(--hud-pri)' : 'var(--hud-border)',
+                  color: mcpState?.lessons?.length ? 'var(--hud-white)' : 'var(--hud-text)',
+                }}
+              >
+                <Plug className="w-3 h-3" /> MCP &amp; TRAIN
+              </button>
               <button
                 onClick={() => {
                   setSearchOpen((v) => !v);
@@ -1459,6 +2456,8 @@ export default function App() {
                 </div>
               </div>
             )}
+              </>
+            )}
           </div>
 
           {/* Dynamic Content Panel below HUD */}
@@ -1506,7 +2505,30 @@ export default function App() {
 
         {/* RIGHT COLUMN — COMMUNICATIONS LOG + COMMAND INPUT */}
         <section className="flex flex-col gap-2.5 min-h-0">
-          <ChamferPanel title="COMMUNICATIONS" code="LOG" className="flex-1 min-h-0">
+          <ChamferPanel
+            title="COMMUNICATIONS"
+            code="LOG"
+            className="flex-1 min-h-0"
+            headerRight={
+              messages.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => void handleClearChat()}
+                  disabled={resetBusy}
+                  title="Clear chat messages"
+                  className="px-1.5 py-0.5 text-[9px] font-mono tracking-[1.2px] uppercase border flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  style={{
+                    backgroundColor: 'var(--hud-panel)',
+                    borderColor: 'var(--hud-border)',
+                    color: 'var(--hud-text-dim)',
+                  }}
+                >
+                  <Trash2 className="w-2.5 h-2.5" />
+                  CLEAR
+                </button>
+              ) : undefined
+            }
+          >
             <div className="flex-1 overflow-y-auto hud-scroll space-y-2 pr-1 hud-selectable">
               {messages.length === 0 ? (
                 <div className="text-xs leading-relaxed p-2" style={{ color: 'var(--hud-text-dim)' }}>
@@ -1681,14 +2703,16 @@ export default function App() {
                 </button>
                 <button
                   onClick={captureScreen}
-                  className="py-1 px-2 border text-[9px] font-semibold tracking-[1px] uppercase flex items-center justify-center gap-1 cursor-pointer"
+                  disabled={screenBusy}
+                  className="py-1 px-2 border text-[9px] font-semibold tracking-[1px] uppercase flex items-center justify-center gap-1 cursor-pointer disabled:opacity-60"
                   style={{
-                    backgroundColor: 'var(--hud-panel)',
-                    borderColor: 'var(--hud-border)',
-                    color: 'var(--hud-text-dim)',
+                    backgroundColor: screenOpen || screenFallbackOpen ? 'var(--hud-pri-gho)' : 'var(--hud-panel)',
+                    borderColor: screenOpen || screenFallbackOpen ? 'var(--hud-pri)' : 'var(--hud-border)',
+                    color: screenOpen || screenFallbackOpen ? 'var(--hud-white)' : 'var(--hud-text-dim)',
                   }}
                 >
-                  <Monitor className="w-3 h-3" /> SCREEN VISION
+                  <Monitor className="w-3 h-3" />{' '}
+                  {screenBusy ? 'CAPTURING...' : screenOpen ? 'SCREEN ON' : 'SCREEN VISION'}
                 </button>
               </div>
             </div>

@@ -7,3 +7,7 @@ coverage/
 .env*
 !.env.example
 .server-config.json
+.jarvis-mcp-state.json
+release/
+desktop/jarvis.ico
+

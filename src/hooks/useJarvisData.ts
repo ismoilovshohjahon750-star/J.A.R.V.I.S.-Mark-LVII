@@ -10,6 +10,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   limit,
   onSnapshot,
   orderBy,
@@ -18,6 +19,7 @@ import {
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import {
   OperationType,
@@ -240,7 +242,7 @@ export function useJarvisData() {
       collection(db, 'users', uid, 'memories'),
       where('uid', '==', uid),
       orderBy('updatedAt', 'desc'),
-      limit(50)
+      limit(80)
     );
     const unsubMems = onSnapshot(
       memQuery,
@@ -392,6 +394,62 @@ export function useJarvisData() {
     [user]
   );
 
+  const upsertMemoryById = useCallback(
+    async (
+      id: string,
+      category: MemoryItem['category'],
+      key: string,
+      content: string
+    ) => {
+      if (!user || !id.trim() || !key.trim() || !content.trim()) return;
+      const safeId = id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
+      const path = `users/${user.uid}/memories/${safeId}`;
+      const validCat = ['identity', 'preference', 'project', 'session', 'fact'].includes(category)
+        ? category
+        : 'fact';
+      const safeKey = key.trim().slice(0, 120);
+      const safeContent = content.trim().slice(0, 2000);
+      const ref = doc(db, 'users', user.uid, 'memories', safeId);
+      try {
+        const snap = await getDoc(ref);
+        if (snap.exists()) {
+          await updateDoc(ref, {
+            category: validCat,
+            key: safeKey,
+            content: safeContent,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          await setDoc(ref, {
+            uid: user.uid,
+            category: validCat,
+            key: safeKey,
+            content: safeContent,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, path);
+      }
+    },
+    [user]
+  );
+
+  const deleteMemoryById = useCallback(
+    async (id: string) => {
+      if (!user || !id.trim()) return;
+      const safeId = id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
+      const path = `users/${user.uid}/memories/${safeId}`;
+      try {
+        await deleteDoc(doc(db, 'users', user.uid, 'memories', safeId));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, path);
+      }
+    },
+    [user]
+  );
+
   const createTask = useCallback(
     async (title: string, prompt: string, agent: 'general' | 'researcher' = 'researcher') => {
       if (!user) return null;
@@ -519,6 +577,65 @@ export function useJarvisData() {
     [user]
   );
 
+  const deleteOwnerSubcollection = useCallback(
+    async (subcollection: 'messages' | 'memories' | 'tasks' | 'routines' | 'monitors') => {
+      if (!user) return;
+      const colPath = `users/${user.uid}/${subcollection}`;
+      let snap;
+      try {
+        snap = await getDocs(
+          query(collection(db, 'users', user.uid, subcollection), where('uid', '==', user.uid))
+        );
+      } catch (err) {
+        handleFirestoreError(err, OperationType.LIST, colPath);
+        return;
+      }
+
+      if (snap.empty) return;
+
+      const docs = snap.docs;
+      const CHUNK = 400;
+      for (let i = 0; i < docs.length; i += CHUNK) {
+        const batch = writeBatch(db);
+        const slice = docs.slice(i, i + CHUNK);
+        for (const d of slice) {
+          batch.delete(d.ref);
+        }
+        try {
+          await batch.commit();
+        } catch (err) {
+          handleFirestoreError(err, OperationType.DELETE, colPath);
+        }
+      }
+    },
+    [user]
+  );
+
+  const clearChatMessages = useCallback(async () => {
+    if (!user) return;
+    await deleteOwnerSubcollection('messages');
+    setMessages([]);
+  }, [user, deleteOwnerSubcollection]);
+
+  const clearAllData = useCallback(async () => {
+    if (!user) return;
+    const collections: Array<'messages' | 'memories' | 'tasks' | 'routines' | 'monitors'> = [
+      'messages',
+      'memories',
+      'tasks',
+      'routines',
+      'monitors',
+    ];
+    for (const col of collections) {
+      await deleteOwnerSubcollection(col);
+    }
+    setMessages([]);
+    setMemories([]);
+    setTasks([]);
+    setRoutines([]);
+    setMonitors([]);
+  }, [user, deleteOwnerSubcollection]);
+
   return {
     user,
     authReady,
@@ -536,11 +653,15 @@ export function useJarvisData() {
     addMessage,
     addMemory,
     removeMemory,
+    upsertMemoryById,
+    deleteMemoryById,
     createTask,
     finishTask,
     createRoutine,
     toggleRoutine,
     createMonitor,
     removeMonitor,
+    clearChatMessages,
+    clearAllData,
   };
 }

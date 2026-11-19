@@ -1140,4 +1140,72 @@ export async function launchRemoteFileOnHost(filePath: string): Promise<{
   );
 }
 
+export async function captureRemoteScreenshot(): Promise<{ base64: string; mimeType: string }> {
+  const cfg = loadRemoteServerConfig();
+  if (!cfg) throw new Error('No remote server configured.');
+
+  const rand = Math.random().toString(36).slice(2, 7).toUpperCase();
+  const startTag = `__SCRS_${rand}__`;
+  const endTag = `__SCRE_${rand}__`;
+
+  return runTtydSession(
+    cfg,
+    async (ctx) => {
+      if (ctx.platform === 'windows') {
+        const ps = [
+          `$ErrorActionPreference = 'Stop'`,
+          `Add-Type -AssemblyName System.Windows.Forms`,
+          `Add-Type -AssemblyName System.Drawing`,
+          `$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen`,
+          `if ($bounds.Width -le 0 -or $bounds.Height -le 0) { throw 'No active display session available.' }`,
+          `$bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)`,
+          `$g = [System.Drawing.Graphics]::FromImage($bmp)`,
+          `$g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)`,
+          `$ms = New-Object System.IO.MemoryStream`,
+          `$codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1`,
+          `$encParams = New-Object System.Drawing.Imaging.EncoderParameters(1)`,
+          `$encParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, 75L)`,
+          `$bmp.Save($ms, $codec, $encParams)`,
+          `$b64 = [Convert]::ToBase64String($ms.ToArray())`,
+          `$g.Dispose(); $bmp.Dispose(); $ms.Dispose()`,
+          `Write-Output ('__SCRS_' + '${rand}__')`,
+          `Write-Output $b64`,
+          `Write-Output ('__SCRE_' + '${rand}__')`,
+        ].join('\n');
+        ctx.sendLine(`powershell -NoProfile -EncodedCommand ${encodePowerShell(ps)}`);
+      } else {
+        const sh = [
+          `TMPF="/tmp/jarvis_scr_${rand}.jpg"`,
+          `if command -v scrot >/dev/null 2>&1; then DISPLAY=\${DISPLAY:-:0} scrot -q 75 "$TMPF";`,
+          `elif command -v import >/dev/null 2>&1; then DISPLAY=\${DISPLAY:-:0} import -window root -quality 75 "$TMPF";`,
+          `elif command -v gnome-screenshot >/dev/null 2>&1; then DISPLAY=\${DISPLAY:-:0} gnome-screenshot -f "$TMPF";`,
+          `else echo "NO_SCREENSHOT_TOOL" >&2; exit 1; fi`,
+          `printf '${startTag}\\n'; base64 -w 0 "$TMPF" 2>/dev/null || base64 "$TMPF"; printf '\\n${endTag}\\n'; rm -f "$TMPF"`,
+        ].join(' ');
+        ctx.sendLine(sh);
+      }
+
+      const out = await ctx.waitForMarker(endTag, 25000);
+      const sIdx = out.indexOf(startTag);
+      const eIdx = out.indexOf(endTag);
+      if (sIdx === -1 || eIdx <= sIdx) {
+        throw new Error('Remote desktop screenshot failed (display session may be headless or locked).');
+      }
+      const b64 = out.slice(sIdx + startTag.length, eIdx).replace(/[^A-Za-z0-9+/=]/g, '');
+      if (b64.length < 100) {
+        throw new Error('Remote screenshot returned empty image data.');
+      }
+      return { base64: b64, mimeType: 'image/jpeg' };
+    },
+    10000,
+    30000
+  );
+}
+
+export function resetRemoteStatusCache() {
+  cachedStatus = null;
+  inFlightQuery = null;
+}
+
+
 
