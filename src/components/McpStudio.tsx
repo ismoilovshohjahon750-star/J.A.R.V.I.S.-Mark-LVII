@@ -114,7 +114,7 @@ export const McpStudio: React.FC<McpStudioProps> = ({
   }, []);
 
   const token = mcpState?.token || '';
-  const requireAuth = mcpState?.requireAuth ?? true;
+  const requireAuth = mcpState?.requireAuth ?? false;
   const lessons = mcpState?.lessons || [];
   const activityLog = mcpState?.activityLog || [];
 
@@ -126,8 +126,10 @@ export const McpStudio: React.FC<McpStudioProps> = ({
   const activeCount = useMemo(() => lessons.filter((l) => l.enabled).length, [lessons]);
 
   const streamableUrl = `${origin}/api/mcp`;
-  const tokenizedUrl = `${origin}/api/mcp?token=${encodeURIComponent(token)}`;
-  const sseTokenizedUrl = `${origin}/api/mcp/sse?token=${encodeURIComponent(token)}`;
+  const tokenizedUrl = requireAuth ? `${origin}/api/mcp?token=${encodeURIComponent(token)}` : streamableUrl;
+  const sseTokenizedUrl = requireAuth
+    ? `${origin}/api/mcp/sse?token=${encodeURIComponent(token)}`
+    : `${origin}/api/mcp/sse`;
 
   const claudeBridgeConfig = useMemo(
     () =>
@@ -153,20 +155,16 @@ export const McpStudio: React.FC<McpStudioProps> = ({
           mcpServers: {
             jarvis: {
               command: 'npx',
-              args: [
-                '-y',
-                'mcp-remote',
-                streamableUrl,
-                '--header',
-                `Authorization: Bearer ${token}`,
-              ],
+              args: requireAuth
+                ? ['-y', 'mcp-remote', streamableUrl, '--header', `Authorization: Bearer ${token}`]
+                : ['-y', 'mcp-remote', streamableUrl],
             },
           },
         },
         null,
         2
       ),
-    [streamableUrl, token]
+    [streamableUrl, token, requireAuth]
   );
 
   const claudeStarterPrompt =

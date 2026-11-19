@@ -41,6 +41,7 @@ export interface McpHudSnapshot {
 interface PersistedMcpState {
   token: string;
   requireAuth: boolean;
+  authExplicit?: boolean;
   lessons: TrainingLesson[];
 }
 
@@ -81,7 +82,8 @@ function loadInitialState(): PersistedMcpState {
       const parsed = JSON.parse(raw) as Partial<PersistedMcpState>;
       return {
         token: typeof parsed.token === 'string' && parsed.token.length >= 12 ? parsed.token : createToken(),
-        requireAuth: typeof parsed.requireAuth === 'boolean' ? parsed.requireAuth : true,
+        requireAuth: parsed.authExplicit === true && parsed.requireAuth === true,
+        authExplicit: parsed.authExplicit === true,
         lessons: Array.isArray(parsed.lessons) ? parsed.lessons.filter(isValidLessonShape) : [],
       };
     }
@@ -90,7 +92,8 @@ function loadInitialState(): PersistedMcpState {
   }
   const fresh: PersistedMcpState = {
     token: createToken(),
-    requireAuth: true,
+    requireAuth: false,
+    authExplicit: false,
     lessons: [],
   };
   savePersistedState(fresh);
@@ -199,6 +202,7 @@ export function rotateMcpToken(): string {
 
 export function setMcpRequireAuth(requireAuth: boolean): boolean {
   state.requireAuth = Boolean(requireAuth);
+  state.authExplicit = Boolean(requireAuth);
   savePersistedState(state);
   broadcastHudEvent('mcp_state', getMcpPublicState());
   return state.requireAuth;
@@ -1236,6 +1240,23 @@ export async function handleMcpStreamableHttp(req: Request, res: Response): Prom
   const clientLabel = inferClientName(req);
 
   if (req.method === 'GET') {
+    const accept = String(req.headers.accept || '').toLowerCase();
+    if (!accept.includes('text/event-stream')) {
+      res.status(200).json({
+        ok: true,
+        server: 'jarvis-mark-lvii-mcp',
+        protocol: 'MCP JSON-RPC 2.0',
+        protocolVersion: PROTOCOL_VERSION,
+        requireAuth: state.requireAuth,
+        endpoints: {
+          streamableHttp: '/api/mcp',
+          legacySse: '/api/mcp/sse',
+        },
+        tools: MCP_TOOLS.map((t) => t.name),
+      });
+      return;
+    }
+
     const sessionId =
       typeof req.headers['mcp-session-id'] === 'string' && req.headers['mcp-session-id'].trim()
         ? req.headers['mcp-session-id'].trim()
